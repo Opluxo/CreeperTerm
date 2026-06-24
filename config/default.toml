@@ -1,0 +1,23 @@
+[general]
+shell = "/bin/bash"
+window_title = "CreeperTerm"
+
+[appearance]
+theme = "default"
+font_family = "Fira Code"
+font_size = 14
+window_width = 1200
+window_height = 800
+opacity = 1.0
+
+[terminal]
+scroll_buffer_size = 10000
+cursor_style = "Block"
+cursor_blink = true
+
+[ssh]
+default_port = 22
+keep_alive_interval = 60
+
+[plugins]
+enabled = true
