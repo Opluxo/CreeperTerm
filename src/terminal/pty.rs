@@ -76,10 +76,7 @@ impl Pty {
 
     #[allow(dead_code)]
     pub fn is_alive(&self) -> bool {
-        self.child
-            .exit_status()
-            .map(|s| !s.success())
-            .unwrap_or(false)
+        self.child.exit_status().is_none()
     }
 
     #[allow(dead_code)]

@@ -183,16 +183,40 @@ impl Buffer {
     }
 
     pub fn scroll_up(&mut self, count: usize) {
-        for _ in 0..count {
-            self.lines.pop_front();
-            self.lines.push_back(Line::new(self.viewport_width));
-        }
+        self.scroll_up_in_region(0, self.viewport_height, count);
     }
 
     pub fn scroll_down(&mut self, count: usize) {
+        self.scroll_down_in_region(0, self.viewport_height, count);
+    }
+
+    pub fn scroll_up_in_region(&mut self, top: usize, bottom: usize, count: usize) {
+        let count = count.min(bottom.saturating_sub(top));
         for _ in 0..count {
-            self.lines.pop_back();
-            self.lines.push_front(Line::new(self.viewport_width));
+            if top < self.lines.len() {
+                self.lines.remove(top);
+            }
+            let new_line = Line::new(self.viewport_width);
+            if bottom <= self.lines.len() {
+                self.lines.insert(bottom, new_line);
+            } else {
+                self.lines.push_back(new_line);
+            }
+        }
+    }
+
+    pub fn scroll_down_in_region(&mut self, top: usize, bottom: usize, count: usize) {
+        let count = count.min(bottom.saturating_sub(top));
+        for _ in 0..count {
+            if bottom > 0 && bottom <= self.lines.len() {
+                self.lines.remove(bottom - 1);
+            }
+            let new_line = Line::new(self.viewport_width);
+            if top < self.lines.len() {
+                self.lines.insert(top, new_line);
+            } else {
+                self.lines.push_front(new_line);
+            }
         }
     }
 
