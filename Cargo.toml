@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["CreeperTerm Contributors"]
 description = "A modern terminal emulator for developers"
-license = "MIT"
+license = "GPL-3.0"
 
 [dependencies]
 iced = { version = "0.13", features = ["tokio"] }
