@@ -65,7 +65,7 @@ impl TabBar {
         }
     }
 
-    pub fn view(&self) -> Element<Message> {
+    pub fn view(&self) -> Element<'_, Message> {
         let mut tab_row = row![];
 
         for (index, tab) in self.tabs.iter().enumerate() {

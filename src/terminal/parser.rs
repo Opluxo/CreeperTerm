@@ -19,6 +19,8 @@ pub struct Parser {
     title: String,
     osc_string: Vec<u8>,
     osc_param: u32,
+    pub cursor_visible: bool,
+    alternate_screen: bool,
 }
 
 impl Parser {
@@ -33,6 +35,8 @@ impl Parser {
             title: String::new(),
             osc_string: Vec::new(),
             osc_param: 0,
+            cursor_visible: true,
+            alternate_screen: false,
         }
     }
 
@@ -168,9 +172,6 @@ impl Parser {
                         self.state = ParserState::Ground;
                     } else if byte == b';' && self.osc_string.is_empty() {
                         // First semicolon separates param from string
-                        // Parse the param from accumulated bytes
-                        let param_str = String::from_utf8_lossy(&self.osc_param.to_be_bytes().to_vec()).to_string();
-                        // Actually parse from the string we've been accumulating
                     } else if byte >= 0x20 {
                         self.osc_string.push(byte);
                     }
@@ -185,35 +186,47 @@ impl Parser {
     }
 
     fn execute_csi(&mut self, buffer: &mut Buffer, final_byte: u8) {
-        let params = &self.params;
-        let param = |i: usize| -> u32 { params.get(i).copied().unwrap_or(0) };
+        let param = |params: &[u32], i: usize| -> u32 { params.get(i).copied().unwrap_or(0) };
+
+        let params = self.params.clone();
 
         // Handle private mode sequences (CSI ? ... h/l)
         if self.intermediate.contains(&b'?') {
             match final_byte {
                 b'h' => {
-                    // Set mode
-                    match param(0) {
+                    match param(&params, 0) {
                         25 => {
-                            // Show cursor - TODO: track cursor visibility
+                            self.cursor_visible = true;
+                            log::debug!("Cursor shown");
                         }
                         1049 => {
-                            // Switch to alternate screen buffer
-                            // TODO: implement alternate buffer
+                            if !self.alternate_screen {
+                                buffer.switch_to_alternate();
+                                self.alternate_screen = true;
+                                self.scroll_top = 0;
+                                self.scroll_bottom = buffer.viewport_height();
+                                buffer.move_cursor(0, 0);
+                                log::debug!("Switched to alternate screen");
+                            }
                         }
                         _ => {}
                     }
                     return;
                 }
                 b'l' => {
-                    // Reset mode
-                    match param(0) {
+                    match param(&params, 0) {
                         25 => {
-                            // Hide cursor - TODO: track cursor visibility
+                            self.cursor_visible = false;
+                            log::debug!("Cursor hidden");
                         }
                         1049 => {
-                            // Switch back from alternate screen buffer
-                            // TODO: implement alternate buffer
+                            if self.alternate_screen {
+                                buffer.switch_to_main();
+                                self.alternate_screen = false;
+                                self.scroll_top = 0;
+                                self.scroll_bottom = buffer.viewport_height();
+                                log::debug!("Switched back to main screen");
+                            }
                         }
                         _ => {}
                     }
@@ -226,49 +239,49 @@ impl Parser {
         match final_byte {
             b'A' => {
                 let (x, y) = buffer.cursor_position();
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 buffer.move_cursor(x, y.saturating_sub(n));
             }
             b'B' => {
                 let (x, y) = buffer.cursor_position();
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 buffer.move_cursor(x, (y + n).min(buffer.viewport_height() - 1));
             }
             b'C' => {
                 let (x, y) = buffer.cursor_position();
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 buffer.move_cursor((x + n).min(buffer.viewport_width() - 1), y);
             }
             b'D' => {
                 let (x, y) = buffer.cursor_position();
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 buffer.move_cursor(x.saturating_sub(n), y);
             }
             b'E' => {
                 let (_, y) = buffer.cursor_position();
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 buffer.move_cursor(0, (y + n).min(buffer.viewport_height() - 1));
             }
             b'F' => {
                 let (_, y) = buffer.cursor_position();
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 buffer.move_cursor(0, y.saturating_sub(n));
             }
             b'G' => {
                 let (_, y) = buffer.cursor_position();
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 buffer.move_cursor((n - 1).min(buffer.viewport_width() - 1), y);
             }
             b'H' | b'f' => {
-                let row = param(0).max(1) as usize;
-                let col = param(1).max(1) as usize;
+                let row = param(&params, 0).max(1) as usize;
+                let col = param(&params, 1).max(1) as usize;
                 buffer.move_cursor(
                     (col - 1).min(buffer.viewport_width() - 1),
                     (row - 1).min(buffer.viewport_height() - 1),
                 );
             }
             b'J' => {
-                let mode = param(0);
+                let mode = param(&params, 0);
                 match mode {
                     0 => buffer.clear_from_cursor_to_end(),
                     1 => buffer.clear_from_start_to_cursor(),
@@ -277,7 +290,7 @@ impl Parser {
                 }
             }
             b'K' => {
-                let mode = param(0);
+                let mode = param(&params, 0);
                 let (x, y) = buffer.cursor_position();
                 match mode {
                     0 => {
@@ -311,43 +324,42 @@ impl Parser {
                 }
             }
             b'L' => {
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 let (_, y) = buffer.cursor_position();
                 buffer.insert_lines(y, n);
             }
             b'M' => {
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 let (_, y) = buffer.cursor_position();
                 buffer.delete_lines(y, n);
             }
             b'P' => {
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 let (x, y) = buffer.cursor_position();
                 buffer.delete_chars(x, y, n);
             }
             b'S' => {
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 buffer.scroll_up_in_region(self.scroll_top, self.scroll_bottom, n);
             }
             b'T' => {
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 buffer.scroll_down_in_region(self.scroll_top, self.scroll_bottom, n);
             }
             b'X' => {
-                let n = param(0).max(1) as usize;
+                let n = param(&params, 0).max(1) as usize;
                 let (x, y) = buffer.cursor_position();
                 buffer.erase_chars(x, y, n);
             }
             b'd' => {
-                let row = param(0).max(1) as usize;
+                let row = param(&params, 0).max(1) as usize;
                 let (x, _) = buffer.cursor_position();
                 buffer.move_cursor(x, (row - 1).min(buffer.viewport_height() - 1));
             }
-            b'm' => self.execute_sgr(params),
+            b'm' => self.execute_sgr(&params),
             b'r' => {
-                // Set scrolling region
-                let top = param(0).max(1) as usize;
-                let bottom = param(1).unwrap_or(buffer.viewport_height() as u32).max(1) as usize;
+                let top = param(&params, 0).max(1) as usize;
+                let bottom = params.get(1).copied().unwrap_or(buffer.viewport_height() as u32).max(1) as usize;
                 self.scroll_top = (top - 1).min(buffer.viewport_height() - 1);
                 self.scroll_bottom = bottom.min(buffer.viewport_height());
                 if self.scroll_top >= self.scroll_bottom {

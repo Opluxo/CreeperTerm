@@ -9,5 +9,5 @@ fn main() -> iced::Result {
     env_logger::init();
     iced::application("CreeperTerm", app::App::update, app::App::view)
         .subscription(app::App::subscription)
-        .run_with("creeper-term", app::App::new)
+        .run_with(app::App::new)
 }

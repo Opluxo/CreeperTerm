@@ -89,6 +89,8 @@ pub struct Line {
 #[derive(Debug)]
 pub struct Buffer {
     lines: VecDeque<Line>,
+    alternate_lines: Option<VecDeque<Line>>,
+    alternate_cursor: Option<(usize, usize)>,
     viewport_height: usize,
     viewport_width: usize,
     #[allow(dead_code)]
@@ -107,6 +109,8 @@ impl Buffer {
 
         Self {
             lines,
+            alternate_lines: None,
+            alternate_cursor: None,
             viewport_height: height,
             viewport_width: width,
             scrollback_size,
@@ -288,7 +292,32 @@ impl Buffer {
         (self.cursor_x, self.cursor_y)
     }
 
-    pub fn lines(&self) -> &[Line] {
+    pub fn switch_to_alternate(&mut self) {
+        if self.alternate_lines.is_none() {
+            self.alternate_lines = Some(std::mem::replace(
+                &mut self.lines,
+                VecDeque::with_capacity(self.viewport_height),
+            ));
+            self.alternate_cursor = Some((self.cursor_x, self.cursor_y));
+            for _ in 0..self.viewport_height {
+                self.lines.push_back(Line::new(self.viewport_width));
+            }
+            self.cursor_x = 0;
+            self.cursor_y = 0;
+        }
+    }
+
+    pub fn switch_to_main(&mut self) {
+        if let Some(main_lines) = self.alternate_lines.take() {
+            self.lines = main_lines;
+            if let Some((x, y)) = self.alternate_cursor.take() {
+                self.cursor_x = x;
+                self.cursor_y = y;
+            }
+        }
+    }
+
+    pub fn lines(&self) -> &VecDeque<Line> {
         &self.lines
     }
 

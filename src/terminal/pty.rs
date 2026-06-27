@@ -4,6 +4,9 @@ pub struct Pty {
     child: Box<dyn portable_pty::Child + Send>,
     writer: Box<dyn Write + Send>,
     reader: Box<dyn Read + Send>,
+    #[allow(dead_code)]
+    master: Option<Box<dyn portable_pty::MasterPty + Send>>,
+    #[allow(dead_code)]
     pty_size: portable_pty::PtySize,
 }
 
@@ -28,7 +31,7 @@ impl Pty {
         cmd.cwd(std::env::current_dir()?);
 
         let child = pair.slave.spawn_command(cmd)?;
-        let mut master = pair.master;
+        let master = pair.master;
         let writer = master.take_writer()?;
         let reader = master.try_clone_reader()?;
 
@@ -36,19 +39,23 @@ impl Pty {
             child,
             writer,
             reader,
+            master: Some(master),
             pty_size,
         })
     }
 
+    #[allow(dead_code)]
     pub fn resize(&mut self, size: PtySize) -> anyhow::Result<()> {
-        self.pty_size = portable_pty::PtySize {
+        let pty_size = portable_pty::PtySize {
             rows: size.rows,
             cols: size.cols,
             pixel_width: 0,
             pixel_height: 0,
         };
 
-        self.child.resize(self.pty_size)?;
+        if let Some(master) = &self.master {
+            master.resize(pty_size)?;
+        }
         Ok(())
     }
 
@@ -75,12 +82,12 @@ impl Pty {
     }
 
     #[allow(dead_code)]
-    pub fn is_alive(&self) -> bool {
-        self.child.exit_status().is_none()
+    pub fn is_alive(&mut self) -> bool {
+        self.child.try_wait().ok().flatten().is_none()
     }
 
     #[allow(dead_code)]
-    pub fn exit_status(&self) -> Option<i32> {
-        self.child.exit_status().map(|s| s.code().unwrap_or(-1))
+    pub fn exit_status(&mut self) -> Option<u32> {
+        self.child.try_wait().ok().flatten().map(|s| s.exit_code())
     }
 }

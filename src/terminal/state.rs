@@ -70,10 +70,7 @@ impl TerminalState {
 
     #[allow(dead_code)]
     pub fn is_alive(&self) -> bool {
-        self.pty
-            .as_ref()
-            .map(|p| p.is_alive())
-            .unwrap_or(false)
+        self.pty.is_some()
     }
 
     #[allow(dead_code)]
