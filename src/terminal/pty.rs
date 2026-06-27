@@ -1,12 +1,12 @@
 use std::io::{Read, Write};
 
+use portable_pty::Child;
+
 pub struct Pty {
-    child: Box<dyn portable_pty::Child + Send>,
+    child: Box<dyn Child + Send>,
     writer: Box<dyn Write + Send>,
     reader: Box<dyn Read + Send>,
-    #[allow(dead_code)]
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
-    #[allow(dead_code)]
     pty_size: portable_pty::PtySize,
 }
 
@@ -29,9 +29,12 @@ impl Pty {
 
         let mut cmd = portable_pty::CommandBuilder::new(shell);
         cmd.cwd(std::env::current_dir()?);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("SHELL", shell);
 
         let child = pair.slave.spawn_command(cmd)?;
-        let master = pair.master;
+        let mut master = pair.master;
         let writer = master.take_writer()?;
         let reader = master.try_clone_reader()?;
 
@@ -44,7 +47,6 @@ impl Pty {
         })
     }
 
-    #[allow(dead_code)]
     pub fn resize(&mut self, size: PtySize) -> anyhow::Result<()> {
         let pty_size = portable_pty::PtySize {
             rows: size.rows,
@@ -65,29 +67,23 @@ impl Pty {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn read(&mut self, buffer: &mut [u8]) -> anyhow::Result<usize> {
-        Ok(self.reader.read(buffer)?)
-    }
-
     pub fn try_read(&mut self, buffer: &mut [u8]) -> anyhow::Result<Option<usize>> {
         use std::io::ErrorKind;
         match self.reader.read(buffer) {
+            Ok(0) => Ok(None),
             Ok(n) => Ok(Some(n)),
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
             Err(ref e) if e.kind() == ErrorKind::TimedOut => Ok(None),
             Err(ref e) if e.kind() == ErrorKind::Interrupted => Ok(None),
+            Err(ref e) if e.kind() == ErrorKind::BrokenPipe => {
+                log::warn!("PTY pipe broken");
+                Ok(None)
+            }
             Err(e) => Err(e.into()),
         }
     }
 
-    #[allow(dead_code)]
     pub fn is_alive(&mut self) -> bool {
         self.child.try_wait().ok().flatten().is_none()
-    }
-
-    #[allow(dead_code)]
-    pub fn exit_status(&mut self) -> Option<u32> {
-        self.child.try_wait().ok().flatten().map(|s| s.exit_code())
     }
 }

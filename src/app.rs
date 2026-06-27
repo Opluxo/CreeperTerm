@@ -1,7 +1,10 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use iced::widget::{button, column, container, horizontal_rule, horizontal_space, row, scrollable, text, text_input};
+use iced::widget::{
+    button, column, container, horizontal_rule, horizontal_space, row, scrollable, text,
+    text_input,
+};
 use iced::{keyboard, window, Element, Length, Point, Size, Subscription, Task};
 
 use crate::config::Settings;
@@ -28,6 +31,8 @@ struct TerminalTab {
     input_tx: mpsc::Sender<Vec<u8>>,
     output_rx: mpsc::Receiver<Vec<u8>>,
     title: String,
+    #[allow(dead_code)]
+    pty_size: PtySize,
 }
 
 #[derive(Debug, Clone)]
@@ -41,12 +46,12 @@ impl Selection {
         let (start_col, start_row) = self.start;
         let (end_col, end_row) = self.end;
 
-        let (row_min, row_max, col_min, col_max) = if start_row < end_row || (start_row == end_row && start_col <= end_col)
-        {
-            (start_row, end_row, start_col, end_col)
-        } else {
-            (end_row, start_row, end_col, start_col)
-        };
+        let (row_min, row_max, col_min, col_max) =
+            if start_row < end_row || (start_row == end_row && start_col <= end_col) {
+                (start_row, end_row, start_col, end_col)
+            } else {
+                (end_row, start_row, end_col, start_col)
+            };
 
         let mut result = String::new();
         for row in row_min..=row_max {
@@ -97,19 +102,17 @@ pub enum Message {
     TabBar(crate::ui::tab_bar::Message),
     PollPty(usize),
     KeyPressed(keyboard::Key, Option<smol_str::SmolStr>),
-    Copy,
-    Paste(String),
-    PasteFromClipboard,
     CopySelection,
+    PasteFromClipboard,
+    Paste(String),
     SelectAll,
     Clear,
     Resized(Size),
     MouseClicked(Point),
     MouseRightClicked(Point),
     MouseMoved(Point),
-    MouseReleased(Point),
+    MouseReleased,
     ContextMenuAction(ContextMenuItem),
-    CloseContextMenu,
     ShowSshDialog,
     CloseSshDialog,
     SshDialogInput(SshDialogField, String),
@@ -163,21 +166,27 @@ impl App {
         )
     }
 
-    fn create_terminal(shell: &str, cols: usize, rows: usize, settings: &Settings) -> TerminalTab {
+    fn create_terminal(
+        shell: &str,
+        cols: usize,
+        rows: usize,
+        settings: &Settings,
+    ) -> TerminalTab {
         let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
         let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>();
 
         let buffer = Buffer::new(cols, rows, settings.terminal.scroll_buffer_size);
         let parser = Parser::new();
 
-        let size = PtySize {
+        let pty_size = PtySize {
             rows: rows as u16,
             cols: cols as u16,
         };
 
         let shell = shell.to_string();
+        let size_clone = pty_size.clone();
         std::thread::spawn(move || {
-            let mut pty = match Pty::new(&shell, size) {
+            let mut pty = match Pty::new(&shell, size_clone) {
                 Ok(pty) => pty,
                 Err(e) => {
                     log::error!("Failed to create PTY: {}", e);
@@ -192,7 +201,7 @@ impl App {
                     }
                 }
 
-                let mut buf = [0u8; 4096];
+                let mut buf = [0u8; 8192];
                 match pty.try_read(&mut buf) {
                     Ok(Some(n)) => {
                         if output_tx.send(buf[..n].to_vec()).is_err() {
@@ -205,7 +214,7 @@ impl App {
                     }
                 }
 
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(5));
             }
         });
 
@@ -215,10 +224,10 @@ impl App {
             input_tx,
             output_rx,
             title: "Terminal".to_string(),
+            pty_size,
         }
     }
 
-    #[allow(dead_code)]
     fn active_terminal(&self) -> Option<&TerminalTab> {
         self.terminals.get(self.active_tab)
     }
@@ -231,8 +240,16 @@ impl App {
         match message {
             Message::PollPty(tab_idx) => {
                 if let Some(tab) = self.terminals.get_mut(tab_idx) {
+                    let mut total_bytes = 0;
                     while let Ok(data) = tab.output_rx.try_recv() {
                         tab.parser.parse(&mut tab.buffer, &data);
+                        total_bytes += data.len();
+                    }
+                    if total_bytes > 0 {
+                        let t = tab.parser.title();
+                        if !t.is_empty() {
+                            tab.title = t.to_string();
+                        }
                     }
                 }
                 let idx = self.active_tab;
@@ -299,17 +316,6 @@ impl App {
             Message::PasteFromClipboard => {
                 iced::clipboard::read().map(|opt| Message::Paste(opt.unwrap_or_default()))
             }
-            Message::Copy => {
-                if let (Some(sel), Some(tab)) =
-                    (&self.selection, self.active_terminal())
-                {
-                    let text = sel.text_from(&tab.buffer);
-                    if !text.is_empty() {
-                        return iced::clipboard::write(text);
-                    }
-                }
-                Task::none()
-            }
             Message::Paste(text) => {
                 if let Some(tab) = self.active_terminal_mut() {
                     let data = text.into_bytes();
@@ -345,25 +351,27 @@ impl App {
 
                 if let Some(tab) = self.active_terminal_mut() {
                     tab.buffer.resize(cols, rows);
+                    tab.pty_size = PtySize {
+                        rows: rows as u16,
+                        cols: cols as u16,
+                    };
                     log::debug!("Terminal resized to {}x{}", cols, rows);
                 }
                 Task::none()
             }
-            Message::MouseClicked(_point) => {
+            Message::MouseClicked(point) => {
                 self.context_menu = None;
-                let point = self.last_mouse_pos;
                 let cell_width = 8.0;
                 let cell_height = 16.0;
                 let col = (point.x / cell_width) as usize;
-                let row = (point.y / cell_height) as usize;
+                let row = ((point.y - 30.0) / cell_height).max(0.0) as usize;
                 self.selection = Some(Selection {
                     start: (col, row),
                     end: (col, row),
                 });
                 Task::none()
             }
-            Message::MouseRightClicked(_point) => {
-                let point = self.last_mouse_pos;
+            Message::MouseRightClicked(point) => {
                 self.context_menu = Some(ContextMenu {
                     position: point,
                     items: vec![
@@ -381,14 +389,14 @@ impl App {
                     let cell_width = 8.0;
                     let cell_height = 16.0;
                     let col = (point.x / cell_width) as usize;
-                    let row = (point.y / cell_height) as usize;
+                    let row = ((point.y - 30.0) / cell_height).max(0.0) as usize;
                     if let Some(sel) = &mut self.selection {
                         sel.end = (col, row);
                     }
                 }
                 Task::none()
             }
-            Message::MouseReleased(_point) => {
+            Message::MouseReleased => {
                 if let Some(sel) = &self.selection {
                     if sel.start == sel.end {
                         self.selection = None;
@@ -404,10 +412,6 @@ impl App {
                     ContextMenuItem::SelectAll => return self.update(Message::SelectAll),
                     ContextMenuItem::Clear => return self.update(Message::Clear),
                 }
-            }
-            Message::CloseContextMenu => {
-                self.context_menu = None;
-                Task::none()
             }
             Message::ShowSshDialog => {
                 self.ssh_dialog = Some(SshDialog {
@@ -447,10 +451,7 @@ impl App {
                         async move {
                             let mut client = crate::ssh::SshClient::new(config.clone());
                             match client.connect(&config) {
-                                Ok(()) => {
-                                    let _ = client.execute("bash");
-                                    Ok(())
-                                }
+                                Ok(()) => Ok(()),
                                 Err(e) => Err(e.to_string()),
                             }
                         },
@@ -488,31 +489,23 @@ impl App {
 
         let mut lines: Vec<Element<Message>> = Vec::new();
 
-        for line in tab.buffer.lines().iter() {
-            let mut line_elements: Vec<Element<Message>> = Vec::new();
+        let (cursor_x, cursor_y) = tab.buffer.cursor_position();
+        let show_cursor = tab.parser.cursor_visible && self.cursor_blink_state;
 
-            for cell in line.cells.iter() {
-                let fg_color = cell
-                    .attributes
-                    .foreground
-                    .map(|c| Theme::color_to_iced(&c))
-                    .unwrap_or_else(|| Theme::color_to_iced(&theme.colors.foreground));
+        for (row_idx, line) in tab.buffer.lines().iter().enumerate() {
+            let mut line_text = String::with_capacity(line.cells.len());
 
-                let mut char_str = String::new();
-                char_str.push(cell.char);
-
-                let t = text(char_str).size(font_size).color(fg_color);
-
-                line_elements.push(t.into());
+            for (col_idx, cell) in line.cells.iter().enumerate() {
+                if show_cursor && col_idx == cursor_x && row_idx == cursor_y {
+                    line_text.push('█');
+                } else {
+                    line_text.push(cell.char);
+                }
             }
 
-            let line_element: Element<Message> = line_elements
-                .into_iter()
-                .fold(row![].into(), |acc: Element<Message>, elem| {
-                    row![acc, elem].into()
-                });
-
-            lines.push(line_element);
+            let fg = Theme::color_to_iced(&theme.colors.foreground);
+            let t = text(line_text).size(font_size).color(fg);
+            lines.push(t.into());
         }
 
         let content = lines
@@ -523,9 +516,14 @@ impl App {
             .height(Length::Fill)
             .id(scrollable::Id::new(format!("terminal-{}", self.active_tab)));
 
+        let bg = Theme::color_to_iced(&theme.colors.background);
         container(scroll)
             .width(Length::Fill)
             .height(Length::Fill)
+            .style(move |_theme| iced::widget::container::Style {
+                background: Some(bg.into()),
+                ..Default::default()
+            })
             .into()
     }
 
@@ -551,35 +549,6 @@ impl App {
             .width(Length::Fill)
             .padding(2)
             .into()
-    }
-
-    fn render_context_menu(&self) -> Option<Element<'_, Message>> {
-        self.context_menu.as_ref().map(|menu| {
-            let mut items_col = column![].padding(4).spacing(2);
-            for item in &menu.items {
-                let (label, msg) = match item {
-                    ContextMenuItem::Copy => ("Copy", Message::ContextMenuAction(ContextMenuItem::Copy)),
-                    ContextMenuItem::Paste => ("Paste", Message::ContextMenuAction(ContextMenuItem::Paste)),
-                    ContextMenuItem::SelectAll => ("Select All", Message::ContextMenuAction(ContextMenuItem::SelectAll)),
-                    ContextMenuItem::Clear => ("Clear", Message::ContextMenuAction(ContextMenuItem::Clear)),
-                };
-                let btn: Element<Message> = button(text(label).size(14))
-                    .on_press(msg)
-                    .width(Length::Fill)
-                    .padding([4, 12])
-                    .into();
-                items_col = items_col.push(btn);
-            }
-
-            let menu_width = 150.0;
-            let menu_height = 200.0;
-            let _ = (menu_width, menu_height);
-
-            container(items_col)
-                .width(Length::Fixed(menu_width))
-                .padding(4)
-                .into()
-        })
     }
 
     fn render_ssh_dialog(&self) -> Option<Element<'_, Message>> {
@@ -626,7 +595,11 @@ impl App {
             let error_text = dialog
                 .error
                 .as_ref()
-                .map(|e| text(format!("Error: {}", e)).color(iced::Color::from_rgb(1.0, 0.3, 0.3)))
+                .map(|e| {
+                    text(format!("Error: {}", e))
+                        .color(iced::Color::from_rgb(1.0, 0.3, 0.3))
+                        .size(12)
+                })
                 .unwrap_or_else(|| text(""));
 
             let buttons = row![
@@ -671,7 +644,7 @@ impl App {
 
         let status_bar = self.render_status_bar();
 
-        let main = column![
+        let mut col = column![
             tab_bar,
             horizontal_rule(1),
             terminal_content,
@@ -681,23 +654,48 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        let mut content: Element<Message> = main.into();
-
         if let Some(menu) = self.render_context_menu() {
-            content = container(column![content, menu]).into();
+            col = col.push(menu);
         }
 
         if let Some(dialog) = self.render_ssh_dialog() {
-            let overlay = container(dialog)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill);
-            content = container(column![content, overlay])
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into();
+            col = col.push(dialog);
         }
 
-        content
+        col.into()
+    }
+
+    fn render_context_menu(&self) -> Option<Element<'_, Message>> {
+        self.context_menu.as_ref().map(|menu| {
+            let mut items_col = column![].padding(4).spacing(2);
+            for item in &menu.items {
+                let (label, msg) = match item {
+                    ContextMenuItem::Copy => {
+                        ("Copy", Message::ContextMenuAction(ContextMenuItem::Copy))
+                    }
+                    ContextMenuItem::Paste => {
+                        ("Paste", Message::ContextMenuAction(ContextMenuItem::Paste))
+                    }
+                    ContextMenuItem::SelectAll => (
+                        "Select All",
+                        Message::ContextMenuAction(ContextMenuItem::SelectAll),
+                    ),
+                    ContextMenuItem::Clear => {
+                        ("Clear", Message::ContextMenuAction(ContextMenuItem::Clear))
+                    }
+                };
+                let btn: Element<Message> = button(text(label).size(14))
+                    .on_press(msg)
+                    .width(Length::Fixed(150.0))
+                    .padding([4, 12])
+                    .into();
+                items_col = items_col.push(btn);
+            }
+
+            container(items_col)
+                .padding(4)
+                .into()
+        })
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -710,8 +708,8 @@ impl App {
             }
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(button)) => {
                 match button {
-                    iced::mouse::Button::Left => Some(Message::MouseClicked(Point::ORIGIN)),
-                    iced::mouse::Button::Right => Some(Message::MouseRightClicked(Point::ORIGIN)),
+                    iced::mouse::Button::Left => None,
+                    iced::mouse::Button::Right => None,
                     _ => None,
                 }
             }
@@ -720,7 +718,7 @@ impl App {
             }
             iced::Event::Mouse(iced::mouse::Event::ButtonReleased(button)) => {
                 match button {
-                    iced::mouse::Button::Left => Some(Message::MouseReleased(Point::ORIGIN)),
+                    iced::mouse::Button::Left => Some(Message::MouseReleased),
                     _ => None,
                 }
             }
